@@ -1,0 +1,4 @@
+// Shared build settings for the SwedishReader target.
+// API keys come from Secrets.xcconfig, which is git-ignored and optional:
+// without it the app builds, and falls back to the phone's own voice.
+#include? "Secrets.xcconfig"
