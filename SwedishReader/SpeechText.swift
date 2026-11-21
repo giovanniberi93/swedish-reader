@@ -39,11 +39,17 @@ enum SpeechText {
         var endsParagraph: Bool
     }
 
+    /// The text's paragraphs (separated by blank lines), with line breaks inside them turned into spaces.
+    static func paragraphs(from text: String) -> [String] {
+        text.split(separator: /\n\s*\n/)
+            .map { $0.replacingOccurrences(of: "\n", with: " ").trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
     /// Splits text into sentences so the voice can pause between them, and pause longer between paragraphs.
     static func utterances(from text: String) -> [Utterance] {
         var result: [Utterance] = []
-        for paragraph in text.split(separator: /\n\s*\n/) {
-            let flat = paragraph.replacingOccurrences(of: "\n", with: " ")
+        for flat in paragraphs(from: text) {
             let tokenizer = NLTokenizer(unit: .sentence)
             tokenizer.string = flat
             tokenizer.setLanguage(.swedish)

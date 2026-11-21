@@ -25,8 +25,11 @@ final class Page {
     var text: String?
     /// English translation of `text`. `nil` means not translated yet.
     var translation: String?
-    /// Epidemic Sound narration of `text` (MP3). `nil` means not generated yet.
+    /// Epidemic Sound narration of `text` (AAC, one clip per paragraph joined together). `nil` means not generated yet.
     @Attribute(.externalStorage) var audioData: Data?
+    /// Where each paragraph of `text` starts in `audioData`, in seconds. `nil` for audio saved before
+    /// paragraphs were tracked, which is regenerated.
+    var paragraphStarts: [Double]?
     /// Clockwise quarter turns the user applied to the photo. Optional so existing pages migrate without a default.
     var quarterTurns: Int?
     var story: Story?

@@ -15,8 +15,20 @@ struct EpidemicVoiceClient {
     /// -1 is the slowest the API allows. The default sounded too fast for reading aloud.
     var speed = -1.0
 
-    func narrate(_ text: String) async throws -> Data {
-        let sessionID = try await startSession()
+    /// One audio clip per text, in the same order. The texts are generated in parallel, each in
+    /// its own MCP session: parallel calls within one session get responses this client can't read.
+    func narrate(_ texts: [String]) async throws -> [Data] {
+        try await withThrowingTaskGroup(of: (Int, Data).self) { group in
+            for (index, text) in texts.enumerated() {
+                group.addTask { (index, try await narrate(text, sessionID: try await startSession())) }
+            }
+            var clips = [Data](repeating: Data(), count: texts.count)
+            for try await (index, clip) in group { clips[index] = clip }
+            return clips
+        }
+    }
+
+    private func narrate(_ text: String, sessionID: String?) async throws -> Data {
         let generation = try await callTool("GenerateVoiceover", [
             "input": ["voiceId": voiceID, "text": text, "languageCode": "sv", "speed": speed],
         ], sessionID: sessionID)

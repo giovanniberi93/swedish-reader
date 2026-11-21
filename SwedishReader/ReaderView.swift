@@ -33,7 +33,13 @@ struct ReaderView: View {
             }
         }
         .onChange(of: currentIndex) { speaker.stop() }
-        .onDisappear { speaker.stop() }
+        // Keep the screen on for as long as a story is open, playing or not, so it doesn't
+        // dim and auto-lock while listening or between pages.
+        .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
+        .onDisappear {
+            speaker.stop()
+            UIApplication.shared.isIdleTimerDisabled = false
+        }
     }
 }
 
@@ -56,14 +62,16 @@ private struct ReaderPageView: View {
         VStack(spacing: 12) {
             pageImage
             if showSwedish || showEnglish {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if showSwedish { swedishText }
-                        if showEnglish { englishText }
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 12) {
+                            if showSwedish { swedishText(scrollingWith: proxy) }
+                            if showEnglish { englishText }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .frame(maxHeight: 200)
                 }
-                .frame(maxHeight: 200)
             }
             if let reason = speaker.fallbackReason {
                 Text(reason).font(.footnote).foregroundStyle(.secondary)
@@ -147,10 +155,23 @@ private struct ReaderPageView: View {
         }
     }
 
-    @ViewBuilder private var swedishText: some View {
-        if let text = page.text {
-            Text(text.isEmpty ? "No text found on this page." : text)
-                .foregroundStyle(text.isEmpty ? .secondary : .primary)
+    @ViewBuilder private func swedishText(scrollingWith proxy: ScrollViewProxy) -> some View {
+        if let text = page.text, !text.isEmpty {
+            let paragraphs = SpeechText.paragraphs(from: text)
+            // The current paragraph follows the playback position, which isn't observable.
+            TimelineView(.periodic(from: .now, by: 0.25)) { _ in
+                ParagraphList(
+                    paragraphs: paragraphs,
+                    current: speaker.currentParagraph,
+                    proxy: proxy,
+                    onTap: { index in
+                        guard speaker.state != .preparing else { return }
+                        speaker.read(page, fromParagraph: index)
+                    }
+                )
+            }
+        } else if page.text != nil {
+            Text("No text found on this page.").foregroundStyle(.secondary)
         } else if recognitionFailed {
             HStack {
                 Text("Couldn't read the text.").foregroundStyle(.secondary)
@@ -209,6 +230,37 @@ private struct ReaderPageView: View {
     }
 }
 
+/// The page's text by paragraph. The paragraph being read is highlighted and kept in view;
+/// tapping a paragraph reads from there.
+private struct ParagraphList: View {
+    let paragraphs: [String]
+    let current: Int?
+    let proxy: ScrollViewProxy
+    let onTap: (Int) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ForEach(Array(paragraphs.enumerated()), id: \.offset) { index, paragraph in
+                Text(paragraph)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(
+                        index == current ? Color.accentColor.opacity(0.2) : .clear,
+                        in: RoundedRectangle(cornerRadius: 6)
+                    )
+                    .contentShape(Rectangle())
+                    .onTapGesture { onTap(index) }
+                    .id(index)
+            }
+        }
+        .onChange(of: current) { _, current in
+            guard let current else { return }
+            withAnimation { proxy.scrollTo(current, anchor: .center) }
+        }
+    }
+}
+
 private struct EditTextView: View {
     @Bindable var page: Page
     @Environment(\.dismiss) private var dismiss
@@ -252,6 +304,7 @@ private struct EditTextView: View {
                                 page.text = draft
                                 page.translation = nil
                                 page.audioData = nil
+                                page.paragraphStarts = nil
                             }
                             dismiss()
                         }

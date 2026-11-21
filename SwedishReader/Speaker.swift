@@ -4,7 +4,8 @@ import Observation
 /// Reads a page aloud.
 ///
 /// With an Epidemic Sound API key, the page's audio is generated once with the Helen voice,
-/// stored on the page, and played from there afterwards. Without a key, or if generation
+/// one clip per paragraph joined into a single file, stored on the page, and played from there
+/// afterwards. Reading can start at any paragraph. Without a key, or if generation
 /// fails, it falls back to the best Swedish voice installed on the device.
 @MainActor
 @Observable
@@ -22,8 +23,17 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegat
     private(set) var fallbackReason: String?
 
     @ObservationIgnored private let synthesizer = AVSpeechSynthesizer()
-    @ObservationIgnored private var queued: Set<ObjectIdentifier> = []
+    /// Looked up once here: creating voices from async code (the fallback after a failed
+    /// generation) logs "unsafeForcedSync called from Swift Concurrent context".
+    @ObservationIgnored private let deviceVoice = Speaker.bestSwedishVoice()
+    /// Paragraph the device voice is speaking.
+    private var spokenParagraph: Int?
+
+    /// Device voice utterances (one per sentence) still to finish, and the paragraph each one is in.
+    @ObservationIgnored private var queued: [ObjectIdentifier: Int] = [:]
     @ObservationIgnored private var player: AVAudioPlayer?
+    /// Where each paragraph starts in the loaded audio file.
+    @ObservationIgnored private var paragraphStarts: [TimeInterval] = []
     @ObservationIgnored private var preparation: Task<Void, Never>?
 
     override init() {
@@ -34,34 +44,56 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegat
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
     }
 
-    func read(_ page: Page) {
+    /// Reads the page, starting at the given paragraph of `SpeechText.paragraphs(from:)`.
+    func read(_ page: Page, fromParagraph first: Int = 0) {
         stop()
         fallbackReason = nil
-        guard let text = page.text, !text.isEmpty else { return }
-        if let audio = page.audioData {
-            play(audio, orSpeak: text)
+        guard let text = page.text else { return }
+        let paragraphs = SpeechText.paragraphs(from: text)
+        guard !paragraphs.isEmpty else { return }
+        let first = min(max(first, 0), paragraphs.count - 1)
+        // Audio saved before paragraphs were tracked has no starts, so it's regenerated.
+        if let audio = page.audioData, let starts = page.paragraphStarts, starts.count == paragraphs.count {
+            play(audio, starts: starts, from: first, orSpeak: paragraphs)
             return
         }
         guard let apiKey = Secrets.epidemicApiKey else {
             fallbackReason = "No Epidemic Sound key in this build (Config/Secrets.xcconfig), using the phone's voice."
-            speakWithDeviceVoice(text)
+            speakWithDeviceVoice(paragraphs, from: first)
             return
         }
         state = .preparing
         preparation = Task {
             do {
-                let audio = try await EpidemicVoiceClient(apiKey: apiKey).narrate(text)
+                let clips = try await EpidemicVoiceClient(apiKey: apiKey).narrate(paragraphs)
+                let pauses = Array(repeating: 0.6, count: paragraphs.count)
+                let narration = try await Task.detached { try Narration.stitch(clips, pauses: pauses) }.value
                 guard !Task.isCancelled else { return }
                 // Don't keep audio for text that was edited while it was being generated.
-                if page.text == text { page.audioData = audio }
-                play(audio, orSpeak: text)
+                if page.text == text {
+                    page.audioData = narration.audio
+                    page.paragraphStarts = narration.starts
+                }
+                play(narration.audio, starts: narration.starts, from: first, orSpeak: paragraphs)
             } catch {
                 guard !Task.isCancelled else { return }
                 state = .idle
                 fallbackReason = "Epidemic Sound voice unavailable (\(error.localizedDescription)), using the phone's voice."
-                speakWithDeviceVoice(text)
+                speakWithDeviceVoice(paragraphs, from: first)
             }
         }
+    }
+
+    /// The paragraph being read or paused on, `nil` when nothing is.
+    ///
+    /// Not observable while an audio file plays (it follows the playback position): views that
+    /// show it refresh on a timer.
+    var currentParagraph: Int? {
+        guard state == .playing || state == .paused else { return nil }
+        if let player {
+            return paragraphStarts.lastIndex { $0 <= player.currentTime + 0.05 } ?? 0
+        }
+        return spokenParagraph
     }
 
     func pause() {
@@ -100,7 +132,9 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegat
         preparation = nil
         player?.stop()
         player = nil
+        paragraphStarts = []
         queued.removeAll()
+        spokenParagraph = nil
         synthesizer.stopSpeaking(at: .immediate)
         state = .idle
     }
@@ -110,34 +144,38 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegat
         (bestSwedishVoice()?.quality ?? .default) != .default
     }
 
-    private func play(_ audio: Data, orSpeak text: String) {
+    private func play(_ audio: Data, starts: [TimeInterval], from first: Int, orSpeak paragraphs: [String]) {
         do {
             let player = try AVAudioPlayer(data: audio)
             player.delegate = self
+            player.currentTime = starts[first]
             player.play()
             self.player = player
+            paragraphStarts = starts
             state = .playing
         } catch {
             fallbackReason = "Couldn't play the saved audio, using the phone's voice."
-            speakWithDeviceVoice(text)
+            speakWithDeviceVoice(paragraphs, from: first)
         }
     }
 
-    private func speakWithDeviceVoice(_ text: String) {
-        let chunks = SpeechText.utterances(from: text)
-        guard !chunks.isEmpty else {
+    /// Speaks sentence by sentence, so the voice pauses between sentences and longer between paragraphs.
+    private func speakWithDeviceVoice(_ paragraphs: [String], from first: Int) {
+        for (index, paragraph) in paragraphs.enumerated().dropFirst(first) {
+            for sentence in SpeechText.utterances(from: paragraph) {
+                let utterance = AVSpeechUtterance(string: sentence.text)
+                utterance.voice = deviceVoice
+                utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.9
+                utterance.postUtteranceDelay = sentence.endsParagraph ? 0.6 : 0.25
+                queued[ObjectIdentifier(utterance)] = index
+                synthesizer.speak(utterance)
+            }
+        }
+        guard !queued.isEmpty else {
             state = .idle
             return
         }
-        let voice = Self.bestSwedishVoice()
-        for chunk in chunks {
-            let utterance = AVSpeechUtterance(string: chunk.text)
-            utterance.voice = voice
-            utterance.rate = AVSpeechUtteranceDefaultSpeechRate * 0.9
-            utterance.postUtteranceDelay = chunk.endsParagraph ? 0.6 : 0.25
-            queued.insert(ObjectIdentifier(utterance))
-            synthesizer.speak(utterance)
-        }
+        spokenParagraph = first
         state = .playing
     }
 
@@ -148,16 +186,27 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegat
             ?? AVSpeechSynthesisVoice(language: "sv-SE")
     }
 
+    private func utteranceStarted(_ id: ObjectIdentifier) {
+        // Utterances cancelled by `stop()` were already removed, so they can't affect a newer reading.
+        if let index = queued[id] { spokenParagraph = index }
+    }
+
     private func utteranceFinished(_ id: ObjectIdentifier) {
-        // Utterances cancelled by `stop()` were already removed, so they can't end a newer reading.
-        guard queued.remove(id) != nil, queued.isEmpty else { return }
+        guard queued.removeValue(forKey: id) != nil, queued.isEmpty else { return }
+        spokenParagraph = nil
         state = .idle
     }
 
     private func playerFinished(_ id: ObjectIdentifier) {
         guard let player, ObjectIdentifier(player) == id else { return }
         self.player = nil
+        paragraphStarts = []
         state = .idle
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
+        let id = ObjectIdentifier(utterance)
+        Task { @MainActor in self.utteranceStarted(id) }
     }
 
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {

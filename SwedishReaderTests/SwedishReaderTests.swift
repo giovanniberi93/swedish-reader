@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import ImageIO
 import SwiftData
@@ -89,6 +90,13 @@ struct SpeechTextTests {
             .init(text: "Katten sov.", endsParagraph: false),
             .init(text: "Hunden skällde!", endsParagraph: true),
             .init(text: "Slut.", endsParagraph: true),
+        ])
+    }
+
+    @Test func paragraphsAreSplitOnBlankLinesAndJoinLineBreaks() {
+        #expect(SpeechText.paragraphs(from: "Katten sov.\nHunden skällde!\n\n  \n\nSlut.\n") == [
+            "Katten sov. Hunden skällde!",
+            "Slut.",
         ])
     }
 
@@ -251,5 +259,44 @@ struct StoryPersistenceTests {
 
     private func inMemoryContainer() throws -> ModelContainer {
         try ModelContainer(for: Story.self, Page.self, configurations: ModelConfiguration(isStoredInMemoryOnly: true))
+    }
+}
+
+struct NarrationTests {
+    @Test func clipsAreJoinedWithPausesAndSentenceStartsAreKept() throws {
+        let clips = [try tone(seconds: 1.0), try tone(seconds: 0.5), try tone(seconds: 0.5)]
+        let narration = try Narration.stitch(clips, pauses: [0.25, 0.6, 0.6])
+
+        #expect(narration.starts.count == 3)
+        #expect(abs(narration.starts[0]) < 0.05)
+        #expect(abs(narration.starts[1] - 1.25) < 0.05)
+        #expect(abs(narration.starts[2] - 2.35) < 0.05)
+        // No pause after the last clip.
+        #expect(abs(try AVAudioPlayer(data: narration.audio).duration - 2.85) < 0.1)
+    }
+
+    @Test func clipsInDifferentFormatsAreRejected() throws {
+        let clips = [try tone(seconds: 0.2, sampleRate: 44_100), try tone(seconds: 0.2, sampleRate: 22_050)]
+        #expect(throws: Narration.StitchError.self) { try Narration.stitch(clips, pauses: [0.25]) }
+    }
+
+    /// An AAC file of a sine tone. The real clips are MP3, which iOS can read but not write.
+    private func tone(seconds: Double, sampleRate: Double = 44_100) throws -> Data {
+        let url = FileManager.default.temporaryDirectory.appending(path: "\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let format = try #require(AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1))
+        let frames = AVAudioFrameCount(seconds * sampleRate)
+        let buffer = try #require(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames))
+        buffer.frameLength = frames
+        let samples = try #require(buffer.floatChannelData?[0])
+        for frame in 0..<Int(frames) { samples[frame] = Float(sin(Double(frame) * 2 * .pi * 440 / sampleRate)) * 0.5 }
+        do {
+            let file = try AVAudioFile(
+                forWriting: url,
+                settings: [AVFormatIDKey: kAudioFormatMPEG4AAC, AVSampleRateKey: sampleRate, AVNumberOfChannelsKey: 1]
+            )
+            try file.write(from: buffer)
+        }
+        return try Data(contentsOf: url)
     }
 }
