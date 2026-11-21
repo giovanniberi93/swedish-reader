@@ -22,6 +22,16 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegat
     /// Why the last reading fell back to the device voice, if it did.
     private(set) var fallbackReason: String?
 
+    static let rates: [Float] = [1, 0.9, 0.8, 0.7]
+    /// Playback speed of the Epidemic Sound audio, remembered across launches. Changes apply
+    /// immediately and keep the voice's pitch. The device voice ignores it.
+    var rate: Float = UserDefaults.standard.object(forKey: "playbackRate") as? Float ?? 1 {
+        didSet {
+            player?.rate = rate
+            UserDefaults.standard.set(rate, forKey: "playbackRate")
+        }
+    }
+
     @ObservationIgnored private let synthesizer = AVSpeechSynthesizer()
     /// Looked up once here: creating voices from async code (the fallback after a failed
     /// generation) logs "unsafeForcedSync called from Swift Concurrent context".
@@ -149,6 +159,8 @@ final class Speaker: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegat
             let player = try AVAudioPlayer(data: audio)
             player.delegate = self
             player.currentTime = starts[first]
+            player.enableRate = true
+            player.rate = rate
             player.play()
             self.player = player
             paragraphStarts = starts

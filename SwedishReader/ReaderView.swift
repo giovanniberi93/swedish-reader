@@ -90,11 +90,12 @@ private struct ReaderPageView: View {
                 Button(action: playOrPause) {
                     Group {
                         switch speaker.state {
-                        case .preparing: HStack { ProgressView(); Text("Preparing…") }
+                        case .preparing: ProgressView().accessibilityLabel("Preparing")
                         case .playing: Label("Pause", systemImage: "pause.fill")
                         case .idle, .paused: Label("Play", systemImage: "play.fill")
                         }
                     }
+                    .labelStyle(.iconOnly)
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
@@ -106,6 +107,18 @@ private struct ReaderPageView: View {
                     .buttonStyle(.bordered)
                     .controlSize(.large)
                     .disabled(speaker.state == .idle)
+
+                Menu {
+                    Picker("Speed", selection: Binding(get: { speaker.rate }, set: { speaker.rate = $0 })) {
+                        ForEach(Speaker.rates, id: \.self) { Text(rateLabel($0)).tag($0) }
+                    }
+                } label: {
+                    Text(rateLabel(speaker.rate)).monospacedDigit()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.large)
+                // Disabled while the device voice reads: it can't change speed.
+                .disabled((speaker.state == .playing || speaker.state == .paused) && !speaker.hasAudioFile)
 
                 Button("Rotate photo", systemImage: "rotate.right") {
                     page.quarterTurns = ((page.quarterTurns ?? 0) + 1) % 4
@@ -191,6 +204,8 @@ private struct ReaderPageView: View {
             Label("Translating…", systemImage: "globe").foregroundStyle(.secondary)
         }
     }
+
+    private func rateLabel(_ rate: Float) -> String { rate.formatted() + "×" }
 
     /// Seeking before playing starts the page's audio from that point.
     private func seek(to time: TimeInterval) {
